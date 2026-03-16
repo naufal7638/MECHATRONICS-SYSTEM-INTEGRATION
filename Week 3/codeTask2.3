@@ -1,0 +1,60 @@
+arduino:
+
+const int potPin = A0;  // Potentiometer connected to analog pin A0
+int potValue = 0;       // Variable to store the potentiometer reading
+
+void setup() {
+  Serial.begin(9600);   // Start serial communication at 9600 bps
+  delay(2000);          // Give the serial connection time to initialize
+}
+
+void loop() {
+  potValue = analogRead(potPin);  // Read analog value (0–1023)
+  
+  // Send the potentiometer value as plain text for Python to read
+  Serial.println(potValue);
+
+  delay(100);  // Small delay for smoother graph (about 10 updates/sec)
+}
+
+
+python:
+
+
+
+import serial
+import matplotlib
+matplotlib.use('TkAgg')  # Use interactive backend for PyCharm
+import matplotlib.pyplot as plt
+
+# --- Serial connection ---
+ser = serial.Serial('COM7', 9600)  # Change COM port to match your Arduino
+
+# --- Live plot setup ---
+plt.ion()
+fig, ax = plt.subplots()
+x_vals, y_vals = [], []
+
+try:
+    while True:
+        line = ser.readline().decode().strip()
+        if line.isdigit():  # Make sure we got a number
+            pot_value = int(line)
+            print("Potentiometer Value:", pot_value)
+            x_vals.append(len(x_vals))
+            y_vals.append(pot_value)
+
+            ax.clear()
+            ax.plot(x_vals, y_vals, color='green', linewidth=2)
+            ax.set_xlabel("Sample Number")
+            ax.set_ylabel("Potentiometer Value (0–1023)")
+            ax.set_title("Real-Time Potentiometer, Servo, and LED Control")
+            ax.grid(True)
+            plt.pause(0.05)
+except KeyboardInterrupt:
+    print("\nStopped by user.")
+finally:
+    ser.close()
+    plt.ioff()
+    plt.show()
+    print("Serial connection closed.")
