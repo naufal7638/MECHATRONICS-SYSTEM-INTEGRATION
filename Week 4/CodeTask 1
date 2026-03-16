@@ -1,0 +1,95 @@
+Arduino:
+
+#include <Wire.h>
+#include <MPU6050.h>
+
+MPU6050 imu;
+
+void setup() {
+  Serial.begin(9600);
+  Wire.begin();
+  imu.initialize();
+
+  if (imu.testConnection())
+    Serial.println("MPU6050 connected!");
+  else {
+    Serial.println("MPU6050 connection failed!");
+    while (1);
+  }
+  delay(1000);
+}
+
+void loop() {
+  int16_t ax, ay, az, gx, gy, gz;
+  imu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+
+  // Send data in CSV format: ax,ay,az,gx,gy,gz
+  Serial.print(ax); Serial.print(",");
+  Serial.print(ay); Serial.print(",");
+  Serial.print(az); Serial.print(",");
+  Serial.print(gx); Serial.print(",");
+  Serial.print(gy); Serial.print(",");
+  Serial.println(gz);
+
+  delay(50); // 20 samples/sec
+}
+
+
+python: 
+
+import serial
+import time
+import matplotlib
+matplotlib.use('TkAgg')   
+import matplotlib.pyplot as plt
+
+# --- Serial setup ---
+ser = serial.Serial('COM5', 9600, timeout=1)   
+time.sleep(2)
+print("✅ Connected to", ser.port)
+
+# --- Matplotlib setup ---
+plt.ion()
+fig, ax = plt.subplots()
+ax.set_title("Real-Time MPU6050 Motion Tracking")
+ax.set_xlabel("X-axis Acceleration")
+ax.set_ylabel("Y-axis Acceleration")
+ax.set_xlim(-20000, 20000)
+ax.set_ylim(-20000, 20000)
+
+(line,) = ax.plot([], [], "ro-", linewidth=1)
+x_data, y_data = [], []
+
+try:
+    while True:
+        data = ser.readline().decode(errors="ignore").strip()
+        if not data:
+            continue
+
+        parts = data.split(",")
+        if len(parts) >= 2:
+            try:
+                ax_val = int(parts[0])
+                ay_val = int(parts[1])
+            except ValueError:
+                continue
+
+            x_data.append(ax_val)
+            y_data.append(ay_val)
+
+            # keep only recent points
+            x_data = x_data[-50:]
+            y_data = y_data[-50:]
+
+            line.set_data(x_data, y_data)
+            ax.relim()
+            ax.autoscale_view()
+            plt.draw()
+            plt.pause(0.01)
+except KeyboardInterrupt:
+    print("\n🛑 Stopped by user.")
+finally:
+    ser.close()
+    plt.ioff()
+    plt.show()
+    print("🔌 Serial connection closed.")
