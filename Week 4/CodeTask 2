@@ -1,0 +1,142 @@
+Arduino:
+
+#include <Wire.h>
+#include <MPU6050.h>
+#include <Servo.h>
+
+MPU6050 imu;
+Servo gateServo;
+
+// Pin definitions
+const int RED_LED = 3;
+const int GREEN_LED = 4;
+const int SERVO_PIN = 9;
+
+// Variables
+bool rfidMatched = false;
+bool motionDetected = false;
+unsigned long motionStart = 0;
+
+void setup() {
+  Serial.begin(9600);
+  Wire.begin();
+
+  // Initialize MPU6050
+  imu.initialize();
+  if (imu.testConnection()) {
+    Serial.println("✅ MPU6050 connected!");
+  } else {
+    Serial.println("❌ MPU6050 connection failed!");
+    while (1);
+  }
+
+  // Initialize pins
+  pinMode(RED_LED, OUTPUT);
+  pinMode(GREEN_LED, OUTPUT);
+  gateServo.attach(SERVO_PIN);
+  gateServo.write(0); // initial position
+
+  // Initial state — all OFF
+  digitalWrite(RED_LED, LOW);
+  digitalWrite(GREEN_LED, LOW);
+
+  Serial.println("System ready... Waiting for RFID input");
+}
+
+void loop() {
+  // --------------- RFID Section ----------------
+  if (Serial.available()) {
+    String rfid = Serial.readStringUntil('\n');
+    rfid.trim();
+
+    Serial.print("Received RFID: ");
+    Serial.println(rfid);
+
+    if (rfid == "0013004466") {
+      Serial.println("✅ Access Granted!");
+      rfidMatched = true;
+      Serial.println("Now perform a circular motion...");
+    } else {
+      Serial.println("❌ Invalid Card");
+      digitalWrite(RED_LED, HIGH);
+      digitalWrite(GREEN_LED, LOW);
+      delay(2000);
+      digitalWrite(RED_LED, LOW);
+      rfidMatched = false;
+    }
+  }
+
+  // --------------- IMU Section ----------------
+  if (rfidMatched) {
+    int16_t gx, gy, gz;
+    imu.getRotation(&gx, &gy, &gz);
+    float magnitude = sqrt((float)gx * gx + gy * gy + gz * gz);
+
+    Serial.print("Rotation magnitude: ");
+    Serial.println(magnitude);
+
+    if (magnitude > 3000) { // Adjust threshold if needed
+      if (!motionDetected) {
+        motionDetected = true;
+        Serial.println("⚙️ Circular motion detected! Activating servo and LED...");
+
+        digitalWrite(GREEN_LED, HIGH);
+        digitalWrite(RED_LED, LOW);
+
+        gateServo.write(90);
+        delay(1000);
+        gateServo.write(0);
+
+        delay(3000);
+        digitalWrite(GREEN_LED, LOW);
+        motionDetected = false;
+        rfidMatched = false;
+        Serial.println("🔴 Reset to standby");
+      }
+    }
+  }
+
+  delay(100);
+}
+
+
+Python
+
+
+import serial
+import time
+import keyboard
+
+# Change this to your Arduino port
+arduino = serial.Serial('COM5', 9600, timeout=1)
+time.sleep(2)  # Wait for Arduino to reset
+
+print("RFID Reader active — Scan your card!\n")
+
+try:
+    rfid = ""
+    while True:
+        event = keyboard.read_event()
+        if event.event_type == keyboard.KEY_DOWN:
+            if event.name == 'enter':
+                print(f"➡️  Sending RFID: {rfid}")
+                arduino.write((rfid + '\n').encode())
+                time.sleep(0.5)
+
+                # Read Arduino response
+                response = arduino.read_all().decode(errors='ignore').strip()
+                if "Access Granted" in response:
+                    print("✅ Access Granted!")
+                elif "Invalid Card" in response or "Unknown" in response:
+                    print("❌ Invalid card detected!")
+                elif response:
+                    print("Arduino:", response)
+                rfid = ""
+            else:
+                rfid += event.name
+
+except KeyboardInterrupt:
+    print("\nProgram stopped.")
+finally:
+    arduino.close()
+    print("🔌 Serial connection closed.")
