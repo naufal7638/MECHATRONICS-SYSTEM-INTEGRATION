@@ -1,0 +1,125 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <esp_now.h>
+
+// Sender inputs
+const int POT_PIN = 34;
+const int TRIG_PIN = 5;
+const int ECHO_PIN = 18;
+
+// Receiver MAC (replace with receiver's MAC printed on boot)
+uint8_t receiverMac[] = {0xEC, 0xE3, 0x34, 0x9A, 0x1E, 0xA8};
+
+struct Payload {
+  uint16_t pot;
+  float distanceCm;
+};
+
+unsigned long lastSendMillis = 0;
+
+// --- smoothing graph parameters ---
+float smoothedDistance = 0.0;
+float smoothedPot = 0.0;
+const float alphaDist = 0.2;  // for ultrasonic
+const float alphaPot  = 0.1;  // for potentiometer (smaller = smoother)
+
+// Callback (keep clean for Serial Plotter)
+void onDataSent(const wifi_tx_info_t *info, esp_now_send_status_t status) { }
+
+// ---------- send manual command ----------
+void sendManualCommand(char c) {
+  esp_now_send(receiverMac, reinterpret_cast<uint8_t *>(&c), 1);
+}
+
+float readDistanceCm() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000); // timeout 30 ms (~5 m)
+  if (duration == 0) return -1.0f;
+  return duration * 0.0343f / 2.0f;
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  digitalWrite(TRIG_PIN, LOW);
+
+  WiFi.mode(WIFI_STA);
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    while (1) delay(100);
+  }
+
+  esp_now_register_send_cb(onDataSent);
+
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, receiverMac, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+  esp_now_add_peer(&peerInfo);
+}
+
+void loop() {
+
+  // ---------- Manual command input ----------
+  if (Serial.available() > 0) {
+    char c = Serial.read();
+
+    if (c == 'R' || c == 'r' ||
+        c == 'G' || c == 'g' ||
+        c == 'B' || c == 'b' ||
+        c == 'V' || c == 'v' ||
+        c == 'A' || c == 'a') {
+
+      sendManualCommand(c);
+      Serial.print("Sent manual command: ");
+      Serial.println(c);
+    }
+  }
+
+  // --- Smooth potentiometer input ---
+  int rawPot = analogRead(POT_PIN);
+  smoothedPot = alphaPot * rawPot + (1 - alphaPot) * smoothedPot;
+
+  // --- Smooth ultrasonic reading ---
+  float newDist = readDistanceCm();
+  if (newDist > 0) {
+    smoothedDistance = alphaDist * newDist + (1 - alphaDist) * smoothedDistance;
+  }
+
+  // Map smoothed potentiometer to threshold range (5–100 cm)
+  float thresholdCm = map((int)smoothedPot, 0, 4095, 5, 100);
+
+  // --- Prepare data for plotting ---
+  Serial.print("Distance(cm):");
+  Serial.print(smoothedDistance, 2);
+  Serial.print(",");
+  Serial.print("Threshold(cm):");
+  Serial.println(thresholdCm, 2);
+
+  // --- RGB & Vibration status output (Serial only) ---
+  if (smoothedDistance < thresholdCm && smoothedDistance > 0) {
+    Serial.println("RGB: RED, Vibration: ON");
+  } else {
+    Serial.println("RGB: GREEN, Vibration: OFF");
+  }
+
+  // --- Send data via ESP-NOW ---
+  Payload payload = {};
+  payload.pot = (uint16_t)smoothedPot;
+  payload.distanceCm = smoothedDistance;
+
+  if (millis() - lastSendMillis >= 100) {
+    esp_now_send(receiverMac, reinterpret_cast<uint8_t *>(&payload), sizeof(payload));
+    lastSendMillis = millis();
+  }
+
+  delay(100);
+}
