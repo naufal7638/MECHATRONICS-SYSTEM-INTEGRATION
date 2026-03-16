@@ -1,0 +1,211 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <esp_now.h>
+
+/* =========================================================
+   PIN DEFINITIONS (Actuators / Outputs)
+   ========================================================= */
+// RGB LED pins used to indicate system state
+const int RED_PIN   = 25;
+const int GREEN_PIN = 26;
+const int BLUE_PIN  = 27;
+
+// Vibration motor pin used for tactile feedback
+const int VIB_PIN   = 16;
+
+/* =========================================================
+   DATA STRUCTURE FOR ESP-NOW AUTO MODE
+   ========================================================= */
+// Payload structure received from sender ESP32
+// pot        : potentiometer value (used to set distance threshold)
+// distanceCm : measured distance from ultrasonic sensor
+struct Payload {
+  uint16_t pot;
+  float distanceCm;
+};
+
+/* =========================================================
+   GLOBAL STATE VARIABLES
+   ========================================================= */
+// Indicates whether system is in manual mode or auto mode
+volatile bool manualMode = false;
+
+// Stores vibration ON/OFF state in manual mode
+bool manualVibOn = false;
+
+/* =========================================================
+   FUNCTION DECLARATION
+   ========================================================= */
+// Forward declaration so function can be used before definition
+void handleSerialCommand(char c);
+
+/* =========================================================
+   ACTUATOR CONTROL FUNCTIONS
+   ========================================================= */
+
+// Sets RGB LED color based on boolean inputs
+void setColor(bool r, bool g, bool b) {
+  digitalWrite(RED_PIN,   r ? HIGH : LOW);
+  digitalWrite(GREEN_PIN, g ? HIGH : LOW);
+  digitalWrite(BLUE_PIN,  b ? HIGH : LOW);
+}
+
+// Turns vibration motor ON or OFF
+void setVibration(bool on) {
+  digitalWrite(VIB_PIN, on ? HIGH : LOW);
+}
+
+/* =========================================================
+   SENSOR DATA PROCESSING
+   ========================================================= */
+
+// Converts potentiometer reading (0–4095) to distance threshold (5–100 cm)
+float potToThresholdCm(uint16_t pot) {
+  return 5.0f + (pot / 4095.0f) * 95.0f;
+}
+
+/* =========================================================
+   ESP-NOW RECEIVE CALLBACK FUNCTION
+   ========================================================= */
+// This function is automatically called when ESP-NOW data is received
+void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
+
+  /* ---------- MANUAL COMMAND VIA ESP-NOW ---------- */
+  // If received data length is 1 byte, it is treated as a manual command
+  if (len == 1) {
+    char cmd = (char)incomingData[0];
+    handleSerialCommand(cmd);  // Process command using same logic as Serial input
+    return;
+  }
+
+  /* ---------- AUTO MODE OPERATION ---------- */
+  // Ignore sensor data if system is currently in manual mode
+  if (manualMode) return;
+
+  // Ignore invalid packet sizes
+  if (len != sizeof(Payload)) return;
+
+  // Copy received data into payload structure
+  Payload payload = {};
+  memcpy(&payload, incomingData, sizeof(payload));
+
+  // Convert potentiometer value to distance threshold
+  float threshold = potToThresholdCm(payload.pot);
+
+  // Decision logic based on measured distance
+  if (payload.distanceCm > 0 && payload.distanceCm <= threshold) {
+    // Obstacle detected within threshold
+    setColor(true, false, false);   // Red LED
+    setVibration(true);             // Vibration ON
+  } else {
+    // No obstacle detected
+    setColor(false, true, false);   // Green LED
+    setVibration(false);            // Vibration OFF
+  }
+}
+
+/* =========================================================
+   MANUAL COMMAND HANDLER (SERIAL + ESP-NOW)
+   ========================================================= */
+// Handles user input commands for manual control
+void handleSerialCommand(char c) {
+  switch (c) {
+
+    case 'B':
+    case 'b':
+      manualMode = true;
+      manualVibOn = false;
+      setColor(false, false, true);   // Blue LED
+      setVibration(false);
+      Serial.println("Manual: Blue");
+      break;
+
+    case 'R':
+    case 'r':
+      manualMode = true;
+      manualVibOn = false;
+      setColor(true, false, false);   // Red LED
+      setVibration(false);
+      Serial.println("Manual: Red");
+      break;
+
+    case 'G':
+    case 'g':
+      manualMode = true;
+      manualVibOn = false;
+      setColor(false, true, false);   // Green LED
+      setVibration(false);
+      Serial.println("Manual: Green");
+      break;
+
+    case 'V':
+    case 'v':
+      manualMode = true;
+      manualVibOn = !manualVibOn;     // Toggle vibration
+      setVibration(manualVibOn);
+      Serial.println(manualVibOn ? "Manual: Vibration ON"
+                                 : "Manual: Vibration OFF");
+      break;
+
+    case 'A':
+    case 'a':
+      manualMode = false;             // Return to auto mode
+      manualVibOn = false;
+      setVibration(false);
+      Serial.println("Auto mode");
+      break;
+
+    default:
+      Serial.println("Commands: B/R/G/V (manual), A (auto)");
+      break;
+  }
+}
+
+/* =========================================================
+   SETUP FUNCTION
+   ========================================================= */
+void setup() {
+  Serial.begin(115200);
+
+  // Configure actuator pins as outputs
+  pinMode(RED_PIN, OUTPUT);
+  pinMode(GREEN_PIN, OUTPUT);
+  pinMode(BLUE_PIN, OUTPUT);
+  pinMode(VIB_PIN, OUTPUT);
+
+  // Ensure all outputs start OFF
+  setColor(false, false, false);
+  setVibration(false);
+
+  // Initialize ESP32 in station mode for ESP-NOW
+  WiFi.mode(WIFI_STA);
+
+  // Print receiver MAC address for sender configuration
+  Serial.print("Receiver MAC (put this in sender): ");
+  Serial.println(WiFi.macAddress());
+
+  // Initialize ESP-NOW communication
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    while (1) delay(100); // Halt if initialization fails
+  }
+
+  // Register callback function for receiving ESP-NOW data
+  esp_now_register_recv_cb(onDataRecv);
+
+  Serial.println("Receiver ready. Commands via Serial or ESP-NOW: B/R/G/V/A");
+}
+
+/* =========================================================
+   MAIN LOOP
+   ========================================================= */
+void loop() {
+
+  // Check for manual commands via Serial Monitor
+  if (Serial.available() > 0) {
+    char c = static_cast<char>(Serial.read());
+    handleSerialCommand(c);
+  }
+
+  delay(10); // Small delay for stability
+}
