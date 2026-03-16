@@ -1,0 +1,413 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <esp_now.h>
+#include <HUSKYLENS.h>
+#include <MPU6050.h>
+
+// Pins
+const int RED_PIN   = 27;
+const int GREEN_PIN = 26;
+const int BLUE_PIN  = 25;
+const int BUZZER_PIN = 17;
+const int TRIG_PIN = 13;
+const int ECHO_PIN = 12;
+const int SDA_PIN = 21;
+const int SCL_PIN = 22;
+
+// WiFi + Telegram
+const char *WIFI_SSID = //"wifi id";
+const char *WIFI_PASSWORD = //"wifi password";
+const char *TELEGRAM_TOKEN = //"insert telegram token here";
+const char *TELEGRAM_CHAT_ID = //"insert telegram chat id here";
+uint8_t receiverMac[] = {0xEC, 0xE3, 0x34, 0x9A, 0x1E, 0xA8};
+
+// Face state handling
+enum FaceState { FACE_NONE = 0, FACE_AUTH = 1, FACE_UNAUTH = 2 };
+FaceState lastFaceState = FACE_NONE;
+int authCount = 0;
+int unauthCount = 0;
+const int FACE_STABLE_COUNT = 5; // require more consecutive frames to reduce mis-detects
+const unsigned long UNAUTH_ALERT_INTERVAL_MS = 5000;
+const float FALL_PITCH_THRESHOLD = 30.0f;
+
+// Buzzer blink
+unsigned long lastBeepToggle = 0;
+bool buzzerState = false;
+// Red blink
+unsigned long lastRedToggle = 0;
+bool redBlinkState = false;
+unsigned long lastUnauthAlertMillis = 0;
+int lastPeerMsg = -1;
+unsigned long lastPeerSendMillis = 0;
+unsigned long fallStartMillis = 0;
+bool fallAlertSent = false;
+bool fallActive = false;
+const float FALL_ANGLE_DEG = 60.0f;
+const unsigned long FALL_CONFIRM_MS = 3000;
+const unsigned long FALL_ON_MS = 1000;
+const unsigned long FALL_OFF_MS = 500;
+
+HUSKYLENS huskylens;
+MPU6050 mpu;
+
+void onDataSent(const uint8_t *macAddr, esp_now_send_status_t status) {
+  Serial.print("ESP-NOW send status: ");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Success" : "Fail");
+}
+
+// Helpers
+void setRgb(bool r, bool g, bool b) {
+  digitalWrite(RED_PIN, r ? HIGH : LOW);
+  digitalWrite(GREEN_PIN, g ? HIGH : LOW);
+  digitalWrite(BLUE_PIN, b ? HIGH : LOW);
+}
+
+void setBuzzer(bool on) {
+  digitalWrite(BUZZER_PIN, on ? HIGH : LOW);
+}
+
+void updateBuzzerBeep(bool enable, unsigned long intervalMs) {
+  if (!enable) {
+    buzzerState = false;
+    setBuzzer(false);
+    return;
+  }
+  if (millis() - lastBeepToggle >= intervalMs) {
+    buzzerState = !buzzerState;
+    setBuzzer(buzzerState);
+    lastBeepToggle = millis();
+  }
+}
+
+void updateRedBlink(bool enable, unsigned long intervalMs) {
+  if (!enable) {
+    redBlinkState = false;
+    digitalWrite(RED_PIN, LOW);
+    return;
+  }
+  if (millis() - lastRedToggle >= intervalMs) {
+    redBlinkState = !redBlinkState;
+    lastRedToggle = millis();
+  }
+  digitalWrite(RED_PIN, redBlinkState ? HIGH : LOW);
+}
+
+void updateFallPattern(bool enable) {
+  if (!enable) {
+    setBuzzer(false);
+    return;
+  }
+  unsigned long phase = millis() % (FALL_ON_MS + FALL_OFF_MS);
+  bool onPhase = phase < FALL_ON_MS;
+  setRgb(onPhase, false, false);
+  setBuzzer(onPhase);
+}
+
+bool connectWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting to WiFi");
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(300);
+    if (millis() - start > 15000) {
+      Serial.println("\nWiFi connect timeout");
+      return false;
+    }
+  }
+  Serial.print("\nWiFi connected, IP: ");
+  Serial.println(WiFi.localIP());
+  Serial.print("WiFi channel: ");
+  Serial.println(WiFi.channel());
+  return true;
+}
+
+String urlEncode(const String &input) {
+  String encoded;
+  const char *hex = "0123456789ABCDEF";
+  for (size_t i = 0; i < input.length(); ++i) {
+    char c = input[i];
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_' ||
+        c == '.' || c == '~') {
+      encoded += c;
+    } else if (c == ' ') {
+      encoded += '+';
+    } else {
+      encoded += '%';
+      encoded += hex[(c >> 4) & 0x0F];
+      encoded += hex[c & 0x0F];
+    }
+  }
+  return encoded;
+}
+
+void sendTelegramAlert(const char *text) {
+  if (WiFi.status() != WL_CONNECTED) {
+    if (!connectWiFi()) {
+      Serial.println("WiFi not connected; skipping Telegram alert");
+      return;
+    }
+  }
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient https;
+  String url = "https://api.telegram.org/bot" + String(TELEGRAM_TOKEN) + "/sendMessage";
+  if (!https.begin(client, url)) {
+    Serial.println("Failed to begin Telegram request");
+    return;
+  }
+  https.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  String body = "chat_id=" + String(TELEGRAM_CHAT_ID) + "&text=" + urlEncode(String(text));
+  int httpCode = https.POST(body);
+  if (httpCode > 0) {
+    Serial.printf("Telegram POST code: %d\n", httpCode);
+  } else {
+    Serial.printf("Telegram POST failed: %s\n", https.errorToString(httpCode).c_str());
+  }
+  https.end();
+}
+
+float readDistanceCm() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000); // timeout 30ms (~5m)
+  if (duration == 0) return -1.0f;
+  return duration * 0.0343f / 2.0f;
+}
+
+void readAccelAngles(float &pitchDeg, float &rollDeg, int16_t &ax, int16_t &ay, int16_t &az) {
+  ax = mpu.getAccelerationX();
+  ay = mpu.getAccelerationY();
+  az = mpu.getAccelerationZ();
+
+  float axf = static_cast<float>(ax);
+  float ayf = static_cast<float>(ay);
+  float azf = static_cast<float>(az);
+
+  pitchDeg = atan2f(-axf, sqrtf(ayf * ayf + azf * azf)) * 180.0f / PI;
+  rollDeg = atan2f(ayf, azf) * 180.0f / PI;
+}
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(SDA_PIN, SCL_PIN);
+  mpu.initialize();
+  if (!mpu.testConnection()) {
+    Serial.println("MPU6050 not detected");
+  }
+  pinMode(RED_PIN, OUTPUT);
+  pinMode(GREEN_PIN, OUTPUT);
+  pinMode(BLUE_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  digitalWrite(TRIG_PIN, LOW);
+  setRgb(false, false, false);
+  setBuzzer(false);
+
+  connectWiFi(); // best effort for Telegram
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    while (1) delay(100);
+  }
+  esp_now_register_send_cb(onDataSent);
+
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, receiverMac, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Failed to add ESP-NOW peer");
+    while (1) delay(100);
+  }
+
+  if (!huskylens.begin(Wire)) {
+    Serial.println("HuskyLens NOT detected!");
+    while (1) delay(100);
+  }
+  Serial.println("HuskyLens ready. Face ID 2 = authorized.");
+}
+
+void loop() {
+  if (!huskylens.request()) {
+    Serial.println("HuskyLens request failed");
+    delay(200);
+    return;
+  }
+
+  bool authorizedSeen = false;
+  bool otherSeen = false;
+
+  while (huskylens.available()) {
+    HUSKYLENSResult result = huskylens.read();
+    if (result.command == COMMAND_RETURN_BLOCK) {
+      if (result.ID == 2 || result.ID == 1) {
+        authorizedSeen = true;
+      } else {
+        otherSeen = true;
+      }
+    }
+  }
+
+  // Brief re-check to let ID settle (helps avoid transient "unknown" before ID 2)
+  if (authorizedSeen || otherSeen) {
+    delay(200);
+    if (huskylens.request()) {
+      bool auth2 = false;
+      bool other2 = false;
+      while (huskylens.available()) {
+        HUSKYLENSResult result = huskylens.read();
+        if (result.command == COMMAND_RETURN_BLOCK) {
+          if (result.ID == 2 || result.ID == 1) auth2 = true;
+          else other2 = true;
+        }
+      }
+      authorizedSeen = auth2;
+      otherSeen = other2;
+    }
+  }
+
+  // debounce: only count pure states
+  if (authorizedSeen && !otherSeen) {
+    authCount++;
+    unauthCount = 0;
+  } else if (otherSeen && !authorizedSeen) {
+    unauthCount++;
+    authCount = 0;
+  } else {
+    authCount = 0;
+    unauthCount = 0;
+  }
+
+  FaceState currentState = FACE_NONE;
+  if (authCount >= FACE_STABLE_COUNT) {
+    currentState = FACE_AUTH;
+  } else if (unauthCount >= FACE_STABLE_COUNT) {
+    currentState = FACE_UNAUTH;
+  } else {
+    // No stable new state: keep previous (so unauthorized stays active until a true face)
+    currentState = lastFaceState;
+  }
+
+  if (currentState != lastFaceState) {
+    if (currentState == FACE_AUTH) {
+      updateRedBlink(false, 500);
+      setRgb(false, true, false);      // green
+      setBuzzer(false);                // buzzer off
+      Serial.println("Authorized: Face ID 2 detected.");
+      sendTelegramAlert("The Vest is Unlocked: Authorized Face Detected.");
+      lastUnauthAlertMillis = 0;
+    } else if (currentState == FACE_UNAUTH) {
+      Serial.println("Triggering Telegram alert: unauthorized face.");
+      sendTelegramAlert("Unauthorized Face Detected: ITEM HAS BEEN STOLEN!");
+      lastUnauthAlertMillis = millis();
+    } else {
+      setBuzzer(false);
+    }
+    lastFaceState = currentState;
+  }
+
+  if (currentState == FACE_UNAUTH) {
+    updateRedBlink(true, 500);
+    setRgb(redBlinkState, false, false);
+    setBuzzer(redBlinkState);  // buzzer follows red blink tempo
+    if (millis() - lastUnauthAlertMillis >= UNAUTH_ALERT_INTERVAL_MS) {
+      sendTelegramAlert("Unauthorized Face Detected: ITEM HAS BEEN STOLEN!");
+      lastUnauthAlertMillis = millis();
+    }
+    // stop receiver vibration while unauthorized
+    uint8_t msg = 0;
+    if (msg != lastPeerMsg || millis() - lastPeerSendMillis > 500) {
+      esp_now_send(receiverMac, &msg, sizeof(msg));
+      lastPeerMsg = msg;
+      lastPeerSendMillis = millis();
+    }
+  } else {
+    updateRedBlink(false, 500);
+    setBuzzer(false);
+
+    // IMU fall detection
+    int16_t ax = 0, ay = 0, az = 0;
+    float pitch = 0.0f, roll = 0.0f;
+    readAccelAngles(pitch, roll, ax, ay, az);
+    bool fallenNow = (fabsf(pitch) > FALL_PITCH_THRESHOLD);
+
+    // Print angle (pitch/roll) for debugging
+    Serial.print("Pitch:");
+    Serial.print(pitch, 1);
+    Serial.print(" Roll:");
+    Serial.println(roll, 1);
+
+    if (fallenNow) {
+      if (fallStartMillis == 0) fallStartMillis = millis();
+      if (!fallActive && millis() - fallStartMillis >= FALL_CONFIRM_MS) {
+        fallActive = true;
+        if (!fallAlertSent) {
+          sendTelegramAlert("Naufal fell down! HELP");
+          fallAlertSent = true;
+        }
+      }
+    } else {
+      if (fallActive) {
+        sendTelegramAlert("Naufal is fine :)");
+      }
+      fallActive = false;
+      fallAlertSent = false;
+      fallStartMillis = 0;
+    }
+
+    if (fallActive) {
+      updateFallPattern(true);
+      uint8_t msg = 0;
+      if (msg != lastPeerMsg || millis() - lastPeerSendMillis > 500) {
+        esp_now_send(receiverMac, &msg, sizeof(msg));
+        lastPeerMsg = msg;
+        lastPeerSendMillis = millis();
+      }
+      delay(50);
+      return;
+    }
+
+    // Ultrasonic-driven vibration to receiver
+    float dist = readDistanceCm();
+    uint8_t msg = 0;
+
+    if (dist > 0 && dist <= 30.0f) {
+      // Very close: continuous vibration + blink red/buzzer at 0.5s
+      msg = 5;
+      updateRedBlink(true, 500);
+      setRgb(redBlinkState, false, false);
+      setBuzzer(redBlinkState);
+    } else if (dist > 0 && dist <= 50.0f) {
+      // Near: pulsed vibration, no buzzer
+      msg = 4;
+      updateRedBlink(false, 500);
+      setRgb(false, true, false);  // keep green when in range
+      setBuzzer(false);
+    } else {
+      // No vibration
+      msg = 0;
+      updateRedBlink(false, 500);
+      setRgb(false, true, false);  // default to green when clear
+      setBuzzer(false);
+    }
+
+    if (msg != lastPeerMsg || millis() - lastPeerSendMillis > 500) {
+      esp_now_send(receiverMac, &msg, sizeof(msg));
+      lastPeerMsg = msg;
+      lastPeerSendMillis = millis();
+    }
+  }
+
+  delay(50);
+}
