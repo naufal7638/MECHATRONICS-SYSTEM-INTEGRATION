@@ -1,0 +1,65 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <esp_wifi.h>
+#include <esp_now.h>
+
+const int VIB_PIN = 25;  // vibration motor control pin
+const unsigned long VIB_BEEP_INTERVAL_MS = 500;
+
+volatile uint8_t vibMode = 0;
+unsigned long lastVibToggle = 0;
+bool vibState = false;
+
+void setVibration(bool on) {
+  digitalWrite(VIB_PIN, on ? HIGH : LOW);
+}
+
+void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
+  if (len < 1) return;
+  uint8_t msg = incomingData[0];
+  if (msg == 4) {
+    vibMode = 1; // 0.5s pulse
+  } else if (msg == 5) {
+    vibMode = 2; // continuous
+  } else {
+    vibMode = 0; // off
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(VIB_PIN, OUTPUT);
+  setVibration(false);
+
+  WiFi.mode(WIFI_STA);
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous(false);
+  Serial.print("Receiver MAC (use in sender): ");
+  Serial.println(WiFi.macAddress());
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    while (1) delay(100);
+  }
+
+  esp_now_register_recv_cb(onDataRecv);
+}
+
+void loop() {
+  if (vibMode == 0) {
+    vibState = false;
+    setVibration(false);
+  } else if (vibMode == 2) {
+    vibState = true;
+    setVibration(true);
+  } else {
+    if (millis() - lastVibToggle >= VIB_BEEP_INTERVAL_MS) {
+      vibState = !vibState;
+      setVibration(vibState);
+      lastVibToggle = millis();
+    }
+  }
+  delay(10);
+}
