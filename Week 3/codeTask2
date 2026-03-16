@@ -1,0 +1,71 @@
+Arduino:
+
+#include <Servo.h>
+
+Servo myServo;
+const int potPin = A0;
+int angle = 0;
+char incomingChar;
+
+void setup() {
+  Serial.begin(9600);
+  myServo.attach(9);
+  Serial.println("Arduino ready. Send 'q' to stop.");
+}
+
+void loop() {
+  // Check if Python sent any command
+  if (Serial.available() > 0) {
+    incomingChar = Serial.read();
+    if (incomingChar == 'q' || incomingChar == 'Q') {
+      Serial.println("Execution halted by Python.");
+      while (true); // Halt Arduino loop
+    }
+  }
+
+  // Read potentiometer (0–1023) and map to 0–180°
+  int potValue = analogRead(potPin);
+  angle = map(potValue, 0, 1023, 0, 180);
+
+  // Move servo
+  myServo.write(angle);
+
+  // Send angle to Python
+  Serial.print("Servo angle: ");
+  Serial.println(angle);
+
+  delay(200); // smooth update
+}
+
+python:
+
+import serial
+import time
+import keyboard  # pip install keyboard
+
+# Adjust this port number as needed
+ser = serial.Serial('COM7', 9600, timeout=1)
+time.sleep(2)  # Wait for Arduino to reset
+
+print("Connected to Arduino. Press 'q' to stop Arduino.")
+
+try:
+    while True:
+        # Read data from Arduino
+        if ser.in_waiting > 0:
+            line = ser.readline().decode('utf-8').strip()
+            if line:
+                print(line)
+
+        # If 'q' is pressed, send stop signal
+        if keyboard.is_pressed('q'):
+            ser.write(b'q')
+            print("Stop command sent to Arduino.")
+            break
+
+except KeyboardInterrupt:
+    print("Program interrupted manually.")
+
+finally:
+    ser.close()
+    print("Serial connection closed.")
