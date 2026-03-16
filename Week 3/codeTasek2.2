@@ -1,0 +1,52 @@
+arduino:
+
+#include <Servo.h>
+
+Servo myServo;
+const int potPin = A0;
+const int ledPin = 8; // LED on D8
+int angle = 0;
+char incomingChar;
+
+void setup() {
+  Serial.begin(9600);
+  myServo.attach(9);
+  pinMode(ledPin, OUTPUT);
+  Serial.println("Arduino ready. Send 'q' to stop.");
+}
+
+void loop() {
+  // Check if Python sent any command
+  if (Serial.available() > 0) {
+    incomingChar = Serial.read();
+    if (incomingChar == 'q' || incomingChar == 'Q') {
+      Serial.println("Execution halted by Python.");
+      while (true); // Halt Arduino loop
+    }
+  }
+
+  // Read potentiometer (0–1023) and map to 0–180°
+  int potValue = analogRead(potPin);
+  angle = map(potValue, 0, 1023, 0, 180);
+
+  // Move servo
+  myServo.write(angle);
+
+  // LED control: ON if pot value > 512, else OFF
+  if (potValue > 512) {
+    digitalWrite(ledPin, HIGH);
+  } else {
+    digitalWrite(ledPin, LOW);
+  }
+
+  // Send angle + LED state to Python
+  Serial.print("Servo angle: ");
+  Serial.print(angle);
+  Serial.print(" | LED: ");
+  Serial.println((potValue > 512) ? "ON" : "OFF");
+
+  delay(200); // smooth update
+}
+
+
+python: No change
