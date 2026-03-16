@@ -1,0 +1,155 @@
+// Segment pins
+const int segmentA = 7;
+const int segmentB = 8;
+const int segmentC = 2;
+const int segmentD = 3;
+const int segmentE = 4;
+const int segmentF = 5;
+const int segmentG = 6;
+
+// Pushbutton pins
+const int incrementButton = 9;
+const int resetButton = 10;
+
+int count = 0; // current displayed number
+int lastIncState = HIGH;
+int lastResetState = HIGH;
+
+unsigned long pressStartTime = 0;
+unsigned long responseTime = 0;
+
+void setup() {
+  // Initialize segment pins
+  pinMode(segmentA, OUTPUT);
+  pinMode(segmentB, OUTPUT);
+  pinMode(segmentC, OUTPUT);
+  pinMode(segmentD, OUTPUT);
+  pinMode(segmentE, OUTPUT);
+  pinMode(segmentF, OUTPUT);
+  pinMode(segmentG, OUTPUT);
+
+  // Buttons as input with internal pull-ups
+  pinMode(incrementButton, INPUT_PULLUP);
+  pinMode(resetButton, INPUT_PULLUP);
+
+  // Start Serial Monitor
+  Serial.begin(9600);
+  displayDigit(count); // show 0 initially
+}
+
+// Function to show one digit on the display (common anode)
+void displayDigit(int num) {
+  // Turn all segments off first
+  digitalWrite(segmentA, HIGH);
+  digitalWrite(segmentB, HIGH);
+  digitalWrite(segmentC, HIGH);
+  digitalWrite(segmentD, HIGH);
+  digitalWrite(segmentE, HIGH);
+  digitalWrite(segmentF, HIGH);
+  digitalWrite(segmentG, HIGH);
+
+  // Turn on selected segments
+  switch (num) {
+    case 0: 
+    digitalWrite(segmentA, LOW); 
+    digitalWrite(segmentB, LOW); 
+    digitalWrite(segmentC, LOW); 
+    digitalWrite(segmentD, LOW); 
+    digitalWrite(segmentE, LOW); 
+    digitalWrite(segmentF, LOW); break;
+    case 1: 
+    digitalWrite(segmentB, LOW); 
+    digitalWrite(segmentC, LOW); break;
+    case 2: 
+    digitalWrite(segmentA, LOW); 
+    digitalWrite(segmentB, LOW); 
+    digitalWrite(segmentG, LOW); 
+    digitalWrite(segmentE, LOW); 
+    digitalWrite(segmentD, LOW); break;
+    case 3: 
+    digitalWrite(segmentA, LOW); 
+    digitalWrite(segmentB, LOW); 
+    digitalWrite(segmentC, LOW); 
+    digitalWrite(segmentD, LOW); 
+    digitalWrite(segmentG, LOW); break;
+    case 4: 
+    digitalWrite(segmentF, LOW); 
+    digitalWrite(segmentG, LOW); 
+    digitalWrite(segmentB, LOW); 
+    digitalWrite(segmentC, LOW); break;
+    case 5: 
+    digitalWrite(segmentA, LOW); 
+    digitalWrite(segmentF, LOW); 
+    digitalWrite(segmentG, LOW); 
+    digitalWrite(segmentC, LOW); 
+    digitalWrite(segmentD, LOW); break;
+    case 6: 
+    digitalWrite(segmentA, LOW); 
+    digitalWrite(segmentF, LOW); 
+    digitalWrite(segmentE, LOW); 
+    digitalWrite(segmentD, LOW); 
+    digitalWrite(segmentC, LOW); 
+    digitalWrite(segmentG, LOW); break;
+    case 7: 
+    digitalWrite(segmentA, LOW); 
+    digitalWrite(segmentB, LOW); 
+    digitalWrite(segmentC, LOW); break;
+    case 8: 
+    digitalWrite(segmentA, LOW); 
+    digitalWrite(segmentB, LOW); 
+    digitalWrite(segmentC, LOW); 
+    digitalWrite(segmentD, LOW); 
+    digitalWrite(segmentE, LOW); 
+    digitalWrite(segmentF, LOW); 
+    digitalWrite(segmentG, LOW); break;
+    case 9: 
+    digitalWrite(segmentA, LOW); 
+    digitalWrite(segmentB, LOW); 
+    digitalWrite(segmentC, LOW); 
+    digitalWrite(segmentD, LOW); 
+    digitalWrite(segmentF, LOW); 
+    digitalWrite(segmentG, LOW); break;
+  }
+}
+
+void loop() {
+  int incState = digitalRead(incrementButton);
+  int resetState = digitalRead(resetButton);
+
+  // --- Increment Button Logic (measure press duration) ---
+  if (incState == LOW && lastIncState == HIGH) {
+    pressStartTime = millis(); // button just pressed
+  }
+
+  if (incState == HIGH && lastIncState == LOW) {
+    // button released → measure duration
+    responseTime = millis() - pressStartTime;
+    count++;
+    if (count > 9) count = 0;
+    displayDigit(count);
+    Serial.print("Increment | Count: ");
+    Serial.print(count);
+    Serial.print(" | Button held for (ms): ");
+    Serial.println(responseTime);
+  }
+
+  // --- Reset Button Logic (measure press duration) ---
+  if (resetState == LOW && lastResetState == HIGH) {
+    pressStartTime = millis(); // button just pressed
+  }
+
+  if (resetState == HIGH && lastResetState == LOW) {
+    responseTime = millis() - pressStartTime;
+    count = 0;
+    displayDigit(count);
+    Serial.print("Reset | Count: ");
+    Serial.print(count);
+    Serial.print(" | Button held for (ms): ");
+    Serial.println(responseTime);
+  }
+
+  // Update last states
+  lastIncState = incState;
+  lastResetState = resetState;
+  delay(50); // small debounce delay
+}
